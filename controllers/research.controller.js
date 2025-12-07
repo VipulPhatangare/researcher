@@ -582,19 +582,28 @@ const triggerPhase2 = async (chatId, refinedProblem, subtopics, embedding) => {
         
         // Store papers immediately for Phase 2 table display
         updatedSession.papers = formattedPapers;
-        updatedSession.phases.phase2.status = 'completed';
-        updatedSession.phases.phase2.completedAt = new Date();
         updatedSession.phases.phase2.n8nWebhookSent = true;
         updatedSession.phases.phase2.n8nResponse = phase2Response;
         updatedSession.phases.phase2.phase2Data = formattedPapers; // Store for Phase 3 matching
-        updatedSession.progress = 25;
-        
-        await updatedSession.save();
         
         // Automatically trigger Phase 3 with PDF links
         const pdfLinks = formattedPapers.map(p => p.pdfLink).filter(link => link);
         if (pdfLinks.length > 0) {
+          updatedSession.phases.phase2.status = 'completed';
+          updatedSession.phases.phase2.completedAt = new Date();
+          updatedSession.progress = 25;
+          await updatedSession.save();
+          
           triggerPhase3(chatId, pdfLinks);
+        } else {
+          // No papers found - mark Phase 2 as failed
+          updatedSession.phases.phase2.status = 'failed';
+          updatedSession.phases.phase2.completedAt = new Date();
+          updatedSession.phases.phase2.error = 'No papers found with valid PDF links';
+          updatedSession.progress = 25;
+          await updatedSession.save();
+          
+          console.error(`❌ Phase 2 completed but no papers found for chatId: ${chatId}`);
         }
       })
       .catch(async (error) => {
@@ -635,6 +644,8 @@ const triggerPhase3 = async (chatId, pdfLinks) => {
     session.progress = 40;
     
     await session.save();
+
+    console.log(`🔄 Phase 3 started for chatId: ${chatId} with ${pdfLinks.length} PDF links`);
 
     // Send to Phase 3 n8n webhook
     sendToPhase3Webhook(chatId, pdfLinks)
@@ -692,19 +703,31 @@ const triggerPhase3 = async (chatId, pdfLinks) => {
           updatedSession.papers = enrichedPapers;
         }
         
-        updatedSession.phases.phase3.status = 'completed';
-        updatedSession.phases.phase3.completedAt = new Date();
         updatedSession.phases.phase3.n8nWebhookSent = true;
         updatedSession.phases.phase3.n8nResponse = phase3Response;
         updatedSession.phases.phase3.phase3Data = phase3Papers;
-        updatedSession.progress = 55;
         
-        await updatedSession.save();
-        
-        // Automatically trigger Phase 4 with chatId and refined problem
-        const refinedProblem = updatedSession.refinedProblem;
-        if (refinedProblem) {
-          triggerPhase4(chatId, refinedProblem);
+        // Check if we got enriched papers
+        if (enrichedPapers.length > 0) {
+          updatedSession.phases.phase3.status = 'completed';
+          updatedSession.phases.phase3.completedAt = new Date();
+          updatedSession.progress = 55;
+          await updatedSession.save();
+          
+          // Automatically trigger Phase 4 with chatId and refined problem
+          const refinedProblem = updatedSession.refinedProblem;
+          if (refinedProblem) {
+            triggerPhase4(chatId, refinedProblem);
+          }
+        } else {
+          // No enriched papers - mark Phase 3 as failed
+          updatedSession.phases.phase3.status = 'failed';
+          updatedSession.phases.phase3.completedAt = new Date();
+          updatedSession.phases.phase3.error = 'No papers were enriched with analysis data from n8n';
+          updatedSession.progress = 40;
+          await updatedSession.save();
+          
+          console.error(`❌ Phase 3 webhook responded but no enriched papers for chatId: ${chatId}`);
         }
       })
       .catch(async (error) => {
@@ -754,6 +777,13 @@ const triggerPhase4 = async (chatId, refinedProblem) => {
         // Parse Phase 4 response - phase4Data is the direct response object, not an array
         const phase4Data = phase4Response.phase4Data;
         
+        console.log('📥 Phase 4 Response:', {
+          isArray: Array.isArray(phase4Data),
+          hasPhase4Data: !!phase4Data,
+          dataType: typeof phase4Data,
+          keys: phase4Data ? Object.keys(phase4Data) : []
+        });
+        
         // Handle both array and direct object response
         let cleanedOutput;
         if (Array.isArray(phase4Data) && phase4Data.length > 0) {
@@ -776,19 +806,43 @@ const triggerPhase4 = async (chatId, refinedProblem) => {
           
           // Mark as modified for Mongoose
           updatedSession.markModified('phase4Analysis');
+          
+          console.log('✅ Phase 4 Analysis stored:', {
+            methodologies: updatedSession.phase4Analysis.mostCommonMethodologies?.length || 0,
+            technologies: updatedSession.phase4Analysis.technologyOrAlgorithms?.length || 0,
+            datasets: updatedSession.phase4Analysis.datasetsUsed?.length || 0,
+            uniqueApproaches: updatedSession.phase4Analysis.uniqueOrLessCommonApproaches?.length || 0
+          });
         }
         
-        updatedSession.phases.phase4.status = 'completed';
-        updatedSession.phases.phase4.completedAt = new Date();
         updatedSession.phases.phase4.n8nWebhookSent = true;
         updatedSession.phases.phase4.n8nResponse = phase4Response;
         updatedSession.phases.phase4.phase4Data = phase4Response.phase4Data;
-        updatedSession.progress = 70;
         
-        await updatedSession.save();
-        
-        // Automatically trigger Phase 5 after Phase 4 completion
-        triggerPhase5(chatId, refinedProblem);
+        // Check if we got analysis data
+        if (cleanedOutput && (
+          cleanedOutput.most_common_methodologies?.length > 0 ||
+          cleanedOutput.technology_or_algorithms?.length > 0 ||
+          cleanedOutput.datasets_used?.length > 0 ||
+          cleanedOutput.unique_or_less_common_approaches?.length > 0
+        )) {
+          updatedSession.phases.phase4.status = 'completed';
+          updatedSession.phases.phase4.completedAt = new Date();
+          updatedSession.progress = 70;
+          await updatedSession.save();
+          
+          // Automatically trigger Phase 5 after Phase 4 completion
+          triggerPhase5(chatId, refinedProblem);
+        } else {
+          // No analysis data - mark Phase 4 as failed
+          updatedSession.phases.phase4.status = 'failed';
+          updatedSession.phases.phase4.completedAt = new Date();
+          updatedSession.phases.phase4.error = 'No analysis data received from n8n';
+          updatedSession.progress = 60;
+          await updatedSession.save();
+          
+          console.error(`❌ Phase 4 webhook responded but no analysis data for chatId: ${chatId}`);
+        }
       })
       .catch(async (error) => {
         const updatedSession = await ResearchSession.findOne({ chatId });
@@ -1098,17 +1152,30 @@ const triggerPhase2Retry = async (chatId, refinedProblem, subtopics, embedding, 
           updatedSession.papers = mergedPapers;
         }
         
-        updatedSession.phases.phase2.status = 'completed';
-        updatedSession.phases.phase2.completedAt = new Date();
         updatedSession.phases.phase2.n8nWebhookSent = true;
         updatedSession.phases.phase2.n8nResponse = phase2Response;
         updatedSession.phases.phase2.phase2Data = phase2Response.phase2Data;
-        updatedSession.progress = 25;
         
-        await updatedSession.save();
-        
-        // Automatically trigger Phase 3
-        triggerPhase3(chatId, updatedSession.papers);
+        // Check if we have papers to process
+        const pdfLinks = updatedSession.papers.map(p => p.pdfLink).filter(link => link);
+        if (pdfLinks.length > 0) {
+          updatedSession.phases.phase2.status = 'completed';
+          updatedSession.phases.phase2.completedAt = new Date();
+          updatedSession.progress = 25;
+          await updatedSession.save();
+          
+          // Automatically trigger Phase 3
+          triggerPhase3(chatId, pdfLinks);
+        } else {
+          // No papers found - mark Phase 2 as failed
+          updatedSession.phases.phase2.status = 'failed';
+          updatedSession.phases.phase2.completedAt = new Date();
+          updatedSession.phases.phase2.error = 'No papers found with valid PDF links after retry';
+          updatedSession.progress = 25;
+          await updatedSession.save();
+          
+          console.error(`❌ Phase 2 retry completed but no papers found for chatId: ${chatId}`);
+        }
       })
       .catch(async (error) => {
         const updatedSession = await ResearchSession.findOne({ chatId });

@@ -42,7 +42,8 @@ const researchSessionSchema = new mongoose.Schema({
     subtopic_id: Number,
     title: String,
     description: String,
-    keywords: [String]
+    keywords: [String],
+    arxiv_search_query: String
   }],
   papers: [{
     title: String,
